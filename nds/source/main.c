@@ -46,7 +46,13 @@ static int rhythm = 0, length = 1, tones = 1, vibrate = 1, glow = 1, dark = 1, f
 static int has_rumble = 0;   // DS Rumble Pak in the GBA slot
 
 static int running = 0, done = 0;
-static u32 frames = 0;   // since Begin
+// Time comes from the hardware vblank interrupt, not from loop passes, so a slow
+// frame can never stretch the breathing rhythm, the timer or the tones.
+static volatile u32 vblanks = 0;
+static void on_vblank(void) { vblanks++; }
+static u32 started_at = 0;   // vblanks at Begin
+static u32 frames = 0;       // vblanks since Begin
+static int last_phase = -1;  // so the first phase of a session always cues
 
 // ---------------------------------------------------------------- colour
 
@@ -147,13 +153,26 @@ static void text(const char *s, int cy, int scale, u8 c) {
     }
 }
 
-static void progress(float f) {
-    int steps = (int)(2 * M_PI * R_PROG * 2 * f);
-    for (int i = 0; i < steps; i++) {
-        float a = 2 * M_PI * i / (2 * M_PI * R_PROG * 2);
-        for (int r = R_PROG - 1; r <= R_PROG; r++)
-            plot(frame, CX + (int)lroundf(r * sinf(a)), CY - (int)lroundf(r * cosf(a)), P_BRASS);
+// The progress arc's pixels, clockwise from 12 o'clock, computed once at startup:
+// drawing them with trig every frame got slower as the arc grew.
+#define PROG_POINTS 1056   // ~2 per pixel of circumference
+static u16 prog_xy[PROG_POINTS][2][2];
+
+static void init_progress(void) {
+    for (int i = 0; i < PROG_POINTS; i++) {
+        float a = 2 * M_PI * i / PROG_POINTS;
+        for (int k = 0; k < 2; k++) {
+            int r = R_PROG - 1 + k;
+            prog_xy[i][k][0] = CX + (int)lroundf(r * sinf(a));
+            prog_xy[i][k][1] = CY - (int)lroundf(r * cosf(a));
+        }
     }
+}
+
+static void progress(float f) {
+    int n = (int)(PROG_POINTS * f);
+    for (int i = 0; i < n; i++)
+        for (int k = 0; k < 2; k++) plot(frame, prog_xy[i][k][0], prog_xy[i][k][1], P_BRASS);
 }
 
 // ---------------------------------------------------------------- sound
@@ -254,7 +273,7 @@ static void draw_timer(void) {
 }
 
 static void start(void) {
-    running = 1; done = 0; frames = 0;
+    running = 1; done = 0; frames = 0; started_at = vblanks; last_phase = -1;
 }
 
 static void stop(int finished) {
@@ -301,7 +320,11 @@ int main(void) {
     DC_FlushRange(wave, sizeof wave);
 
     draw_layer();
+    init_progress();
     draw_ui();
+    irqSet(IRQ_VBLANK, on_vblank);
+    irqEnable(IRQ_VBLANK);
+    u32 last_tick = vblanks;
 
     while (1) {
         scanKeys();
@@ -319,6 +342,7 @@ int main(void) {
         int tenths = (600 + (tin + tout) / 2) / (tin + tout);   // breaths per minute, one decimal
         sprintf(small, "%d.%d/MIN", tenths / 10, tenths % 10);
 
+        if (running) frames = vblanks - started_at;
         if (running) {
             float el = frames / FPS, total = LENGTHS[length] * 60.0f;
             if (el >= total) {
@@ -330,8 +354,6 @@ int main(void) {
                 float k = inhale ? p / tin : 1 - (p - tin) / tout;
                 e = 0.5f - 0.5f * cosf(M_PI * k);
                 f = el / total;
-                static int last_phase = -1;
-                if (frames == 0) last_phase = -1;
                 if (inhale != last_phase) {
                     last_phase = inhale;
                     tone(inhale ? 523 : 392, inhale ? 1.2f : 1.6f);
@@ -339,13 +361,15 @@ int main(void) {
                 }
                 strcpy(big, inhale ? "IN" : "OUT");
                 sprintf(small, "%d", (int)ceilf(inhale ? tin - p : cyc - p));
-                frames++;
             }
         }
         if (!running && done) strcpy(big, "DONE");
-        if (finish_chime && --finish_chime == 0) tone(523, 2.8f);
-        tone_tick();
-        vibrate_tick();
+        // Envelopes advance once per vblank that passed, even if this loop pass ran long.
+        for (u32 now = vblanks; last_tick != now; last_tick++) {
+            if (finish_chime && --finish_chime == 0) tone(523, 2.8f);
+            tone_tick();
+            vibrate_tick();
+        }
 
         set_palette(running && glow ? e : 0);
         memcpy(frame, layer, sizeof frame);
