@@ -25,8 +25,8 @@
 // frame so the glow tints the background and everything drawn on it.
 enum { P_BG, P_LINE, P_WELL, P_SPOT, P_BRASS, P_INK, P_INKSOFT };
 
-typedef struct { int r, g, b; } rgb;   // 0-255
-static const rgb BONE = {243, 236, 220}, WELL = {232, 222, 200}, INK = {31, 42, 68},
+typedef struct { int r, g, b; } rgb8;   // 0-255
+static const rgb8 BONE = {243, 236, 220}, WELL = {232, 222, 200}, INK = {31, 42, 68},
                  INKSOFT = {74, 84, 112}, SPOT = {95, 143, 122}, BRASS = {184, 145, 63},
                  GLOW = {127, 174, 149};
 #define GLOW_MAX 0.42f
@@ -46,13 +46,13 @@ static u32 frames = 0;   // since Begin
 
 // ---------------------------------------------------------------- colour
 
-static u16 mix(rgb a, rgb b, float t) {
+static u16 mix(rgb8 a, rgb8 b, float t) {
     return RGB15((int)(a.r + (b.r - a.r) * t) >> 3, (int)(a.g + (b.g - a.g) * t) >> 3,
                  (int)(a.b + (b.b - a.b) * t) >> 3);
 }
 
 static void set_palette(float g) {
-    rgb bg = {BONE.r + (int)((GLOW.r - BONE.r) * g), BONE.g + (int)((GLOW.g - BONE.g) * g),
+    rgb8 bg = {BONE.r + (int)((GLOW.r - BONE.r) * g), BONE.g + (int)((GLOW.g - BONE.g) * g),
               BONE.b + (int)((GLOW.b - BONE.b) * g)};
     BG_PALETTE[P_BG] = mix(bg, bg, 0);
     BG_PALETTE[P_LINE] = mix(bg, INK, 0.18f);
@@ -252,7 +252,7 @@ int main(void) {
     draw_layer();
     draw_ui();
 
-    while (pmMainLoop()) {
+    while (1) {
         scanKeys();
         int down = keysDown();
         if (down & (KEY_A | KEY_START)) { running ? stop(0) : start(); draw_ui(); }
