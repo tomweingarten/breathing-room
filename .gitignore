@@ -1,2 +1,5 @@
 .DS_Store
 *.bak*
+nds/build/
+nds/*.nds
+nds/*.elf
