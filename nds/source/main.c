@@ -17,6 +17,7 @@
 // Ring geometry (the web version's 300-unit viewBox, scaled to fit 192 px).
 #define R_OUTER 80
 #define R_MIN 36    // breath at rest
+#define R_IDLE 52   // before Begin and after Done, so the label fits inside
 #define R_MAX 76    // breath at the top of the in-breath
 #define R_PROG 84   // session progress arc
 #define R_RAYS 87
@@ -176,7 +177,7 @@ static int finish_chime = 0;   // frames until the second closing note
 #define ROW_GO 13
 #define ROW_TIMER 16
 
-static void fmt_time(char *out, int secs) { sprintf(out, "%d:%02d", secs / 60, secs % 60); }
+static void fmt_time(char *out, int secs) { snprintf(out, 16, "%d:%02d", secs / 60, secs % 60); }
 
 static void draw_ui(void) {
     static const int label_rows[4] = {ROW_RHYTHM - 1, ROW_LENGTH - 1, ROW_TONES, ROW_GLOW};
@@ -203,7 +204,7 @@ static void draw_ui(void) {
 
 static void draw_timer(void) {
     int total = LENGTHS[length] * 60, el = running ? (int)(frames / FPS) : 0;
-    char a[8], b[8];
+    char a[16], b[16];
     fmt_time(a, el);
     fmt_time(b, total - el);
     printf("\x1b[%d;1H%-6s           %6s left", ROW_TIMER, a, b);
@@ -244,6 +245,9 @@ int main(void) {
     int bg = bgInit(3, BgType_Bmp8, BgSize_B8_256x256, 0, 0);
     vram = (u8 *)bgGetGfxPtr(bg);
     consoleDemoInit();   // touchscreen text UI
+    // House colours on the touchscreen: paper backdrop, navy text.
+    BG_PALETTE_SUB[0] = mix(BONE, BONE, 0);
+    for (int i = 1; i < 256; i++) BG_PALETTE_SUB[i] = mix(INK, INK, 0);
 
     soundEnable();
     for (int i = 0; i < 32; i++) wave[i] = (s8)(i < 16 ? -96 + i * 12 : 96 - (i - 16) * 12);
@@ -293,12 +297,13 @@ int main(void) {
 
         set_palette(running && glow ? GLOW_MAX * e : 0);
         memcpy(frame, layer, sizeof frame);
-        int r = R_MIN + (int)((R_MAX - R_MIN) * e);
+        int r = running ? R_MIN + (int)((R_MAX - R_MIN) * e) : R_IDLE;
         disk(frame, r, P_SPOT);
         disk(frame, r - 2, P_WELL);
         if (running) progress(f);
-        text(big, CY - 6, 4, P_INK);
-        text(small, CY + 22, 2, P_INKSOFT);
+        int words = strlen(big) > 3;   // READY / DONE are wider than IN / OUT
+        text(big, CY - 6, words ? 3 : 4, P_INK);
+        text(small, CY + (words ? 18 : 22), 2, P_INKSOFT);
 
         DC_FlushRange(frame, sizeof frame);
         swiWaitForVBlank();   // copy during vblank so the ring never tears
