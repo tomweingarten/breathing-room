@@ -35,7 +35,9 @@ To host it yourself, put the folder on any static host (GitHub Pages, Netlify, a
 
 ## Nintendo DS version
 
-`nds/` is the same pacer for the Nintendo DS (DS, DS Lite, DSi, 3DS): the ring on the top screen, settings and Begin on the touchscreen. The A button also begins and stops; the +pad picks and changes settings.
+`nds/` is the same pacer for the Nintendo DS (DS, DS Lite, DSi, 3DS): the ring on the top screen, settings and Begin on the touchscreen, dark theme by default. The A button also begins and stops; the +pad picks and changes settings.
+
+**Vibration** needs a DS Rumble Pak in the GBA slot (DS and DS Lite): two short buzzes for in, one long buzz for out, so it works in bed with the sound off and your eyes closed.
 
 **Install:** download `breathing-room.nds` from the [latest release](https://github.com/tomweingarten/breathing-room/releases) and copy it to your flashcart's microSD card (a DS Lite needs a Slot-1 flashcart such as an R4). On a DSi or 3DS, run it from TWiLight Menu++.
 
