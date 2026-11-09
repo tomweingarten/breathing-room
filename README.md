@@ -37,7 +37,11 @@ To host it yourself, put the folder on any static host (GitHub Pages, Netlify, a
 
 `nds/` is the same pacer for the Nintendo DS (DS, DS Lite, DSi, 3DS): the ring on the top screen, settings and Begin on the touchscreen, dark theme by default. The A button also begins and stops; the +pad picks and changes settings.
 
-**Vibration** needs a DS Rumble Pak in the GBA slot (DS and DS Lite): two short buzzes for in, one long buzz for out, so it works in bed with the sound off and your eyes closed.
+**Vibration** (BUZZ), for following along in bed with the sound off and your eyes closed:
+- **headphone jack:** a hum on the headphone output drives a small haptic actuator through an amplifier (e.g. Adafruit PAM8302 + a Vybronics VG0832012 LRA coin). The vibration swells on the in-breath and fades on the out-breath; plugging into the jack mutes the speakers. HUM sets the frequency (match your actuator, 235 Hz for the VG0832012) and STRENGTH caps the level; changing either plays a 2-second test swell.
+- **rumble pak:** a DS Rumble Pak in the GBA slot (DS and DS Lite): two short buzzes for in, one long buzz for out.
+
+**Lights out** switches both screens off a few seconds into a session and keeps them off through the end; any button wakes them. Sessions run 3 to 30 minutes and ease out over the last minute. Settings are saved to `/data/breathing-room.cfg` on the SD card.
 
 **Install:** download `breathing-room.nds` from the [latest release](https://github.com/tomweingarten/breathing-room/releases) and copy it to your flashcart's microSD card (a DS Lite needs a Slot-1 flashcart such as an R4). On a DSi or 3DS, run it from TWiLight Menu++.
 

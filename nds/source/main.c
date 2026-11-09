@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <fat.h>
 #include <nds.h>
 
 #define W 256
@@ -41,9 +42,14 @@ static u8 *vram;
 // ---------------------------------------------------------------- settings
 
 static const int RHYTHMS[4][2] = {{4, 6}, {5, 5}, {4, 8}, {5, 7}};
-static const int LENGTHS[3] = {3, 10, 15};
-static int rhythm = 0, length = 1, tones = 1, vibrate = 1, glow = 1, dark = 1, focus = 0;
+#define N_LENGTHS 5
+static const int LENGTHS[N_LENGTHS] = {3, 10, 15, 20, 30};
+// BUZZ: off, a haptic actuator on the headphone jack (driven by a hum), or a Rumble Pak.
+enum { BUZZ_OFF, BUZZ_JACK, BUZZ_PAK };
+static int rhythm = 0, length = 1, tones = 1, buzz_mode = BUZZ_OFF, hum_hz = 235, strength = 2;
+static int glow = 1, dark = 1, lights_out = 0, focus = 0;
 static int has_rumble = 0;   // DS Rumble Pak in the GBA slot
+static int has_fat = 0;      // settings can be saved to the SD card
 
 static int running = 0, done = 0;
 // Time comes from the hardware vblank interrupt, not from loop passes, so a slow
@@ -210,7 +216,7 @@ static const int *buzz = NULL;
 static int buzz_step = 0, buzz_left = 0, motor = 0;
 
 static void vibrate_pattern(const int *pattern) {
-    if (!vibrate || !has_rumble) return;
+    if (buzz_mode != BUZZ_PAK || !has_rumble) return;
     buzz = pattern; buzz_step = 0; buzz_left = pattern[0];
 }
 
@@ -223,23 +229,109 @@ static void vibrate_tick(void) {
     buzz_left = buzz[buzz_step];
 }
 
+// Headphone-jack haptics: a sine hum whose volume follows the breath, so an
+// actuator (via a small amp) swells on the in-breath and fades on the out-breath.
+// Plugging into the jack mutes the speakers. STRENGTH caps the volume in software.
+static s8 sine[32] ALIGN(4);
+static int hum_voice = -1, preview_left = 0;
+#define PREVIEW_FRAMES 120   // a 2 s test swell when the hum is adjusted outside a session
+#define HUM_FLOOR 150
+#define HUM_CEIL 260
+
+static void hum_start(void) {
+    if (hum_voice >= 0) return;
+    hum_voice = soundPlaySample(sine, SoundFormat_8Bit, sizeof sine, hum_hz * 32, 0, 64, true, 0);
+}
+
+static void hum_stop(void) {
+    if (hum_voice >= 0) soundKill(hum_voice);
+    hum_voice = -1;
+}
+
+static void hum_preview(void) {
+    if (buzz_mode != BUZZ_JACK) return;
+    hum_start();
+    soundSetFreq(hum_voice, hum_hz * 32);
+    preview_left = PREVIEW_FRAMES;
+}
+
+// level: 0-1 (breath fullness x end-of-session fade), or <0 for "not in a session".
+static void hum_tick(float level) {
+    if (hum_voice < 0) return;
+    float max = 25.0f * strength;   // strength 1-5 -> volume up to 125 of 127
+    if (level >= 0) { soundSetVolume(hum_voice, (u8)(max * level)); return; }
+    if (preview_left > 0) {
+        preview_left--;
+        soundSetVolume(hum_voice, (u8)(max * sinf(M_PI * (PREVIEW_FRAMES - preview_left) / PREVIEW_FRAMES)));
+        if (preview_left == 0) hum_stop();
+    }
+}
+
+// ---------------------------------------------------------------- settings file
+
+#define SETTINGS_PATH "/data/breathing-room.cfg"
+
+static void save_settings(void) {
+    if (!has_fat) return;
+    FILE *f = fopen(SETTINGS_PATH, "w");
+    if (!f) return;
+    fprintf(f, "%d %d %d %d %d %d %d %d %d\n", rhythm, length, tones, buzz_mode, hum_hz, strength,
+            glow, dark, lights_out);
+    fclose(f);
+}
+
+static void load_settings(void) {
+    if (!has_fat) return;
+    FILE *f = fopen(SETTINGS_PATH, "r");
+    if (!f) return;
+    int v[9];
+    if (fscanf(f, "%d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6],
+               &v[7], &v[8]) == 9) {
+        rhythm = v[0] % 4; length = v[1] % N_LENGTHS; tones = !!v[2]; buzz_mode = v[3] % 3;
+        hum_hz = v[4] < HUM_FLOOR || v[4] > HUM_CEIL ? 235 : v[4];
+        strength = v[5] < 1 || v[5] > 5 ? 2 : v[5];
+        glow = !!v[6]; dark = !!v[7]; lights_out = !!v[8];
+    }
+    fclose(f);
+}
+
+// ---------------------------------------------------------------- lights out
+
+// With LIGHTS OUT on, both backlights switch off a few seconds into a session and
+// stay off through the end, so finishing doesn't light up a dark room. Any button
+// or touch turns them back on for a few seconds.
+#define LIGHTS_DELAY (5 * 60)   // vblanks
+static int lit = 1;
+static u32 last_input = 0;
+
+static void backlights(int on) {
+    if (on == lit) return;
+    lit = on;
+    if (on) powerOn(PM_BACKLIGHT_TOP | PM_BACKLIGHT_BOTTOM);
+    else powerOff(PM_BACKLIGHT_TOP | PM_BACKLIGHT_BOTTOM);
+}
+
 // ---------------------------------------------------------------- touchscreen
 
 #define ROW_RHYTHM 4
 #define ROW_LENGTH 7
 #define ROW_TONES 9
-#define ROW_VIBRATE 10
-#define ROW_GLOW 11
-#define ROW_THEME 12
-#define ROW_GO 15
-#define ROW_TIMER 18
-#define FOCUS_ITEMS 6
+#define ROW_BUZZ 10
+#define ROW_HZ 11
+#define ROW_STRENGTH 12
+#define ROW_GLOW 13
+#define ROW_THEME 14
+#define ROW_LIGHTS 15
+#define ROW_GO 18
+#define ROW_TIMER 21
+#define FOCUS_ITEMS 9
 
 static void fmt_time(char *out, int secs) { snprintf(out, 16, "%d:%02d", secs / 60, secs % 60); }
 
 static void draw_ui(void) {
-    static const int label_rows[FOCUS_ITEMS] = {ROW_RHYTHM - 1, ROW_LENGTH - 1, ROW_TONES,
-                                                ROW_VIBRATE, ROW_GLOW, ROW_THEME};
+    static const int label_rows[FOCUS_ITEMS] = {ROW_RHYTHM - 1, ROW_LENGTH - 1, ROW_TONES, ROW_BUZZ,
+                                                ROW_HZ, ROW_STRENGTH, ROW_GLOW, ROW_THEME, ROW_LIGHTS};
+    static const char *BUZZ_NAMES[3] = {"off", "headphone jack", "rumble pak"};
     consoleClear();
     printf("\x1b[1;1HBREATHING ROOM");
     printf("\x1b[%d;1HRHYTHM", ROW_RHYTHM - 1);
@@ -248,19 +340,18 @@ static void draw_ui(void) {
         printf(i == rhythm ? "[%d-%d] " : " %d-%d  ", RHYTHMS[i][0], RHYTHMS[i][1]);
     printf("\x1b[%d;1HLENGTH", ROW_LENGTH - 1);
     printf("\x1b[%d;1H", ROW_LENGTH);
-    for (int i = 0; i < 3; i++) printf(i == length ? "[%2dm] " : " %2dm  ", LENGTHS[i]);
+    for (int i = 0; i < N_LENGTHS; i++) printf(i == length ? "[%2dm]" : " %2dm ", LENGTHS[i]), printf(" ");
     printf("\x1b[%d;1HTONES  %s", ROW_TONES, tones ? "[on]  off" : " on  [off]");
-    if (has_rumble) printf("\x1b[%d;1HBUZZ   %s", ROW_VIBRATE, vibrate ? "[on]  off" : " on  [off]");
-    else printf("\x1b[%d;1HBUZZ   needs a Rumble Pak", ROW_VIBRATE);
+    printf("\x1b[%d;1HBUZZ   < %s >", ROW_BUZZ, BUZZ_NAMES[buzz_mode]);
+    printf("\x1b[%d;1HHUM    < %d Hz >", ROW_HZ, hum_hz);
+    printf("\x1b[%d;1HSTRENGTH < %d of 5 >", ROW_STRENGTH, strength);
     printf("\x1b[%d;1HGLOW   %s", ROW_GLOW, glow ? "[on]  off" : " on  [off]");
     printf("\x1b[%d;1HTHEME  %s", ROW_THEME, dark ? "[dark]  light" : " dark  [light]");
+    printf("\x1b[%d;1HLIGHTS OUT %s", ROW_LIGHTS, lights_out ? "[on]  off" : " on  [off]");
     printf("\x1b[%d;0H>", label_rows[focus]);
     printf("\x1b[%d;8H+--------------+", ROW_GO - 1);
     printf("\x1b[%d;8H|    %s    |", ROW_GO, running ? " STOP " : "BEGIN ");
     printf("\x1b[%d;8H+--------------+", ROW_GO + 1);
-    printf("\x1b[20;1HNose in, slow out.");
-    printf("\x1b[21;1HHigh tone or two buzzes: in.");
-    printf("\x1b[22;1HLow tone or long buzz: out.");
     printf("\x1b[23;1HA begin/stop  +pad settings");
 }
 
@@ -273,31 +364,55 @@ static void draw_timer(void) {
 }
 
 static void start(void) {
-    running = 1; done = 0; frames = 0; started_at = vblanks; last_phase = -1;
+    running = 1; done = 0; frames = 0; started_at = vblanks; last_phase = -1; last_input = vblanks;
+    preview_left = 0;
+    if (buzz_mode == BUZZ_JACK) hum_start();
 }
 
 static void stop(int finished) {
     running = 0; done = finished;
+    hum_stop();
     if (finished) { tone(659, 2.4f); finish_chime = 30; vibrate_pattern(BUZZ_DONE); }
+    else backlights(1);   // stopped by hand: you want to see the screen
 }
 
 static void adjust(int row, int dir) {
     if (row == 0) rhythm = (rhythm + dir + 4) % 4;
-    if (row == 1) length = (length + dir + 3) % 3;
+    if (row == 1) length = (length + dir + N_LENGTHS) % N_LENGTHS;
     if (row == 2) tones = !tones;
-    if (row == 3 && has_rumble) vibrate = !vibrate;
-    if (row == 4) glow = !glow;
-    if (row == 5) { dark = !dark; set_sub_palette(); }
+    if (row == 3) {
+        do buzz_mode = (buzz_mode + dir + 3) % 3; while (buzz_mode == BUZZ_PAK && !has_rumble);
+        hum_stop();
+        if (buzz_mode == BUZZ_JACK) { if (running) hum_start(); else hum_preview(); }
+    }
+    if (row == 4) {
+        hum_hz += 5 * dir;
+        hum_hz = hum_hz < HUM_FLOOR ? HUM_FLOOR : hum_hz > HUM_CEIL ? HUM_CEIL : hum_hz;
+        if (running && hum_voice >= 0) soundSetFreq(hum_voice, hum_hz * 32); else hum_preview();
+    }
+    if (row == 5) {
+        strength += dir;
+        strength = strength < 1 ? 1 : strength > 5 ? 5 : strength;
+        if (!running) hum_preview();
+    }
+    if (row == 6) glow = !glow;
+    if (row == 7) { dark = !dark; set_sub_palette(); }
+    if (row == 8) lights_out = !lights_out;
+    save_settings();
 }
 
 static void handle_touch(touchPosition t) {
     int row = t.py / 8, col = t.px / 8;
-    if (row == ROW_RHYTHM && col >= 1 && col < 25) { rhythm = (col - 1) / 6; focus = 0; }
-    else if (row == ROW_LENGTH && col >= 1 && col < 19) { length = (col - 1) / 6; focus = 1; }
-    else if (row == ROW_TONES) { tones = !tones; focus = 2; }
-    else if (row == ROW_VIBRATE) { focus = 3; adjust(3, 1); }
-    else if (row == ROW_GLOW) { glow = !glow; focus = 4; }
-    else if (row == ROW_THEME) { focus = 5; adjust(5, 1); }
+    int dir = col < 16 ? -1 : 1;   // < > rows: left half steps down, right half up
+    if (row == ROW_RHYTHM && col >= 1 && col < 25) { rhythm = (col - 1) / 6; focus = 0; save_settings(); }
+    else if (row == ROW_LENGTH && col >= 1 && col < 31) { length = (col - 1) / 6; focus = 1; save_settings(); }
+    else if (row == ROW_TONES) { focus = 2; adjust(2, 1); }
+    else if (row == ROW_BUZZ) { focus = 3; adjust(3, dir); }
+    else if (row == ROW_HZ) { focus = 4; adjust(4, dir); }
+    else if (row == ROW_STRENGTH) { focus = 5; adjust(5, dir); }
+    else if (row == ROW_GLOW) { focus = 6; adjust(6, 1); }
+    else if (row == ROW_THEME) { focus = 7; adjust(7, 1); }
+    else if (row == ROW_LIGHTS) { focus = 8; adjust(8, 1); }
     else if (row >= ROW_GO - 1 && row <= ROW_GO + 1) { running ? stop(0) : start(); }
     else return;
     draw_ui();
@@ -316,8 +431,17 @@ int main(void) {
     has_rumble = isRumbleInserted();
 
     soundEnable();
-    for (int i = 0; i < 32; i++) wave[i] = (s8)(i < 16 ? -96 + i * 12 : 96 - (i - 16) * 12);
+    for (int i = 0; i < 32; i++) {
+        wave[i] = (s8)(i < 16 ? -96 + i * 12 : 96 - (i - 16) * 12);
+        sine[i] = (s8)lroundf(120 * sinf(2 * M_PI * i / 32));
+    }
     DC_FlushRange(wave, sizeof wave);
+    DC_FlushRange(sine, sizeof sine);
+
+    has_fat = fatInitDefault();
+    load_settings();
+    if (buzz_mode == BUZZ_PAK && !has_rumble) buzz_mode = BUZZ_OFF;
+    set_sub_palette();
 
     draw_layer();
     init_progress();
@@ -329,6 +453,12 @@ int main(void) {
     while (1) {
         scanKeys();
         int down = keysDown();
+        if (down) {   // any input wakes the screens; while dark, that press only wakes
+            int was_dark = !lit;
+            last_input = vblanks;
+            backlights(1);
+            if (was_dark) down = 0;
+        }
         if (down & (KEY_A | KEY_START)) { running ? stop(0) : start(); draw_ui(); }
         if (down & KEY_UP) { focus = (focus + FOCUS_ITEMS - 1) % FOCUS_ITEMS; draw_ui(); }
         if (down & KEY_DOWN) { focus = (focus + 1) % FOCUS_ITEMS; draw_ui(); }
@@ -337,7 +467,7 @@ int main(void) {
         if (down & KEY_TOUCH) { touchPosition t; touchRead(&t); handle_touch(t); }
 
         int tin = RHYTHMS[rhythm][0], tout = RHYTHMS[rhythm][1];
-        float e = 0, f = 0;
+        float e = 0, f = 0, fade = 1;
         char big[8] = "READY", small[12];
         int tenths = (600 + (tin + tout) / 2) / (tin + tout);   // breaths per minute, one decimal
         sprintf(small, "%d.%d/MIN", tenths / 10, tenths % 10);
@@ -354,6 +484,7 @@ int main(void) {
                 float k = inhale ? p / tin : 1 - (p - tin) / tout;
                 e = 0.5f - 0.5f * cosf(M_PI * k);
                 f = el / total;
+                fade = total - el < 60 ? (total - el) / 60 : 1;   // ease out over the last minute
                 if (inhale != last_phase) {
                     last_phase = inhale;
                     tone(inhale ? 523 : 392, inhale ? 1.2f : 1.6f);
@@ -369,7 +500,10 @@ int main(void) {
             if (finish_chime && --finish_chime == 0) tone(523, 2.8f);
             tone_tick();
             vibrate_tick();
+            if (!running) hum_tick(-1);
         }
+        if (running) hum_tick(e * fade);
+        if (running && lights_out && vblanks - last_input > LIGHTS_DELAY) backlights(0);
 
         set_palette(running && glow ? e : 0);
         memcpy(frame, layer, sizeof frame);
